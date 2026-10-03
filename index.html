@@ -17,8 +17,8 @@ main{max-width:560px;margin:auto;padding:max(12px,env(safe-area-inset-top)) 14px
 h1{font-size:20px;margin:6px 0 12px}h2{font-size:16px;margin:22px 0 8px}
 .cam{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:4/3}
 video{width:100%;height:100%;object-fit:cover;display:block}
-.guide{position:absolute;border:2px solid var(--plate);border-radius:6px;touch-action:none;cursor:move}.guide .h{position:absolute;right:-2px;bottom:-2px;width:34px;height:34px;background:var(--plate);border-radius:6px 0 6px 0;touch-action:none}
-.cam p{position:absolute;inset:0;display:grid;place-items:center;margin:0;color:var(--mute);text-align:center;padding:20px}
+.guide{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;position:absolute;border:2px solid var(--plate);border-radius:6px;touch-action:none;cursor:move}.guide .h{position:absolute;right:-2px;bottom:-2px;width:48px;height:48px;background:var(--plate);border-radius:6px 0 6px 0;touch-action:none}
+.cam p{pointer-events:none;position:absolute;inset:0;display:grid;place-items:center;margin:0;color:var(--mute);text-align:center;padding:20px}
 button,select{font:inherit;border-radius:8px;border:0;padding:12px 14px;background:var(--panel);color:var(--ink)}
 button.go{background:var(--plate);color:#111;font-weight:700}
 .row{display:flex;gap:8px;margin-top:10px}.row>*{flex:1}
@@ -29,6 +29,7 @@ button.go{background:var(--plate);color:#111;font-weight:700}
 .msg b{font-size:18px}.mute{color:var(--mute);font-size:14px}
 details{background:var(--panel);border-radius:8px;margin-bottom:6px;padding:10px 12px}
 summary{cursor:pointer;display:flex;justify-content:space-between;font-weight:600}
+.msg.today{border-left:5px solid #6aa9ff}.md{color:var(--bad);font-weight:600}.bd{color:#6aa9ff;font-weight:600}.dh{margin-top:8px}
 .s{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid #2c4052;font-size:14px}
 .s button{padding:2px 8px;background:none;color:var(--bad)}
 .set{display:flex;gap:8px;align-items:center;justify-content:space-between}
@@ -36,7 +37,7 @@ summary{cursor:pointer;display:flex;justify-content:space-between;font-weight:60
 </head>
 <body>
 <main>
-<h1>PlateLog</h1>
+<h1>PlateLog <small class="mute">v8</small></h1>
 <div class="cam"><video id="v" playsinline muted></video><div class="guide"><span class="h"></span></div><p id="ph">Camera is off</p></div>
 <div class="row"><button id="cam">Start camera</button><button id="scan" class="go" disabled>Read plate</button><button id="auto" disabled>Auto: off</button></div>
 <div class="row"><button id="mode">Search: yellow box</button><button id="rbox">Reset box</button></div>
@@ -45,6 +46,7 @@ summary{cursor:pointer;display:flex;justify-content:space-between;font-weight:60
 <div class="row"><button id="log" class="go">Log sighting</button></div>
 <div id="res"></div>
 <h2>History</h2>
+<div class="row"><button id="multi">Show: all plates</button></div>
 <div id="hist"></div>
 <h2>Settings</h2>
 <div class="set"><label for="ret">Delete sightings older than</label>
@@ -78,6 +80,8 @@ function lev(a,b){const d=Array.from({length:a.length+1},(_,i)=>[i]);for(let j=1
   for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));
   return d[a.length][b.length]}
 const fmt=t=>new Date(t).toLocaleString('en-GB',{dateStyle:'medium',timeStyle:'short'});
+const fmtT=t=>new Date(t).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+const day=t=>new Date(t).toLocaleDateString('en-CA'),pl=(n,w)=>n+' '+w+(n===1?'':'s');
 const where=r=>r.lat==null?'location unavailable':r.lat.toFixed(4)+', '+r.lng.toFixed(4);
 
 // Camera
@@ -117,6 +121,7 @@ $('#rbox').onclick=()=>{box={x:.1,y:.37,w:.8,h:.26};localStorage.setItem('platel
     if(m.r){box.w=Math.min(1-box.x,Math.max(.2,m.b.w+dx));box.h=Math.min(1-box.y,Math.max(.1,m.b.h+dy))}
     else{box.x=Math.min(1-box.w,Math.max(0,m.b.x+dx));box.y=Math.min(1-box.h,Math.max(0,m.b.y+dy))}
     paintBox()});
+  ['touchstart','touchmove'].forEach(t=>g.addEventListener(t,e=>e.preventDefault(),{passive:false}));
   const end=()=>{if(m){m=null;localStorage.setItem('platelog.box',JSON.stringify(box))}};
   g.addEventListener('pointerup',end);g.addEventListener('pointercancel',end);
 })();
@@ -154,6 +159,7 @@ $('#scan').onclick=async()=>{
 };
 
 // Auto mode: reads about once a second, logs a plate seen in two frames in a row
+const COOL=10*60*1000; // Auto mode won't log the same plate again within 10 minutes
 let auto=false,last='',seen={},wl,ac;
 function beep(){try{const o=ac.createOscillator();o.frequency.value=880;o.connect(ac.destination);o.start();o.stop(ac.currentTime+.25)}catch(e){}}
 async function loop(){
@@ -162,7 +168,7 @@ async function loop(){
     const b=await readFrame();
     if(auto&&b&&valid(b)){
       const c=canon(b);
-      if(c===last&&!(seen[c]>Date.now()-12e4)){seen[c]=Date.now();logPlate(b,true)}
+      if(c===last&&!(seen[c]>Date.now()-COOL||load().some(r=>canon(r.p)===c&&Date.now()-r.t<COOL))){seen[c]=Date.now();logPlate(b,true)}
       last=c;
     }else last='';
   }catch(e){}
@@ -191,7 +197,12 @@ function check(p){
 function logPlate(p,isAuto){
   const {same,near}=check(p);
   let h='';
-  if(same.length){h+=`<div class="msg hit"><b>${p}: seen ${same.length} time${same.length>1?'s':''} before</b>`+same.slice().reverse().slice(0,5).map(r=>`<div class="mute">${fmt(r.t)} · ${where(r)}</div>`).join('')+'</div>';if(isAuto)beep()}
+  if(same.length){
+    const td=day(Date.now()),tN=same.filter(r=>day(r.t)===td),pN=same.filter(r=>day(r.t)!==td),pD=new Set(pN.map(r=>day(r.t))).size;
+    const head=[tN.length?'seen '+pl(tN.length,'time')+' earlier today':'',pD?(tN.length?'and ':'seen ')+'on '+pl(pD,'previous day')+' ('+pl(pN.length,'sighting')+')':''].filter(Boolean).join(' ');
+    h+=`<div class="msg ${tN.length?'hit':'today'}"><b>${p}: ${head}</b>`+same.slice().reverse().slice(0,6).map(r=>`<div class="mute">${day(r.t)===td?'Today '+fmtT(r.t):fmt(r.t)} · ${where(r)}</div>`).join('')+'</div>';
+    if(isAuto)beep();
+  }
   else h+=`<div class="msg new"><b>${p}: first sighting</b></div>`;
   if(near.length)h+=`<div class="msg maybe"><b>Possible match</b><div class="mute">Close to ${near.join(', ')}. Could be a misread.</div></div>`;
   if(!valid(p))h+='<div class="msg maybe mute">Not a standard UK format. Logged anyway.</div>';
@@ -208,12 +219,22 @@ $('#log').onclick=()=>{
 };
 
 // History
+let view=0;const VIEWS=['Show: all plates','Show: repeats in one day','Show: seen on 2+ days'];
 function render(){
   const g={};load().forEach(r=>(g[canon(r.p)]??=[]).push(r));
-  const keys=Object.keys(g).sort((a,b)=>g[b].at(-1).t-g[a].at(-1).t);
-  $('#hist').innerHTML=keys.length?keys.map(k=>{const rs=g[k];return `<details><summary><span>${rs.at(-1).p}</span><span class="mute">${rs.length}× · ${fmt(rs.at(-1).t)}</span></summary>`+
-    rs.slice().reverse().map(r=>`<div class="s"><span>${fmt(r.t)}<br><span class="mute">${where(r)}${r.p!==rs.at(-1).p?' · read as '+r.p:''}</span></span><button data-t="${r.t}" aria-label="Delete sighting">Delete</button></div>`).join('')+'</details>'}).join(''):'<p class="mute">No sightings yet. Scan or type a plate and tap Log sighting.</p>';
+  const perDay=k=>g[k].reduce((o,r)=>(o[day(r.t)]=(o[day(r.t)]||0)+1,o),{});
+  const nd=k=>Object.keys(perDay(k)).length,mx=k=>Math.max(...Object.values(perDay(k)));
+  let keys=Object.keys(g).sort((a,b)=>g[b].at(-1).t-g[a].at(-1).t);
+  if(view===1)keys=keys.filter(k=>mx(k)>1);
+  if(view===2)keys=keys.filter(k=>nd(k)>1);
+  $('#hist').innerHTML=keys.length?keys.map(k=>{
+    const rs=g[k],n=nd(k),m=mx(k),byDay={};rs.slice().reverse().forEach(r=>(byDay[day(r.t)]??=[]).push(r));
+    return `<details><summary><span>${rs.at(-1).p}</span><span class="mute"><span class="${m>1?'md':''}">${rs.length}×${m>1?' (up to '+m+' in a day)':''}</span> · <span class="${n>1?'bd':''}">${pl(n,'day')}</span> · ${fmt(rs.at(-1).t)}</span></summary>`+
+    Object.keys(byDay).map(d=>`<div class="mute dh">${new Date(byDay[d][0].t).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'})} · ${pl(byDay[d].length,'sighting')}</div>`+
+      byDay[d].map(r=>`<div class="s"><span>${fmtT(r.t)} · <span class="mute">${where(r)}${r.p!==rs.at(-1).p?' · read as '+r.p:''}</span></span><button data-t="${r.t}" aria-label="Delete sighting">Delete</button></div>`).join('')).join('')+'</details>'
+  }).join(''):(view===1?'<p class="mute">No plates seen more than once in a day yet.</p>':view===2?'<p class="mute">No plates seen on more than one day yet.</p>':'<p class="mute">No sightings yet. Scan or type a plate and tap Log sighting.</p>');
 }
+$('#multi').onclick=()=>{view=(view+1)%3;$('#multi').textContent=VIEWS[view];render()};
 $('#hist').onclick=e=>{const t=e.target.dataset.t;if(t){save(load().filter(r=>String(r.t)!==t));render()}};
 $('#wipe').onclick=()=>{if(confirm('Delete every logged sighting on this device?')){save([]);render();$('#res').innerHTML=''}};
 $('#ret').value=String(days);
