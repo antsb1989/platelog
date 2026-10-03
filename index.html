@@ -38,7 +38,7 @@ summary{cursor:pointer;display:flex;justify-content:space-between;font-weight:60
 <main>
 <h1>PlateLog</h1>
 <div class="cam"><video id="v" playsinline muted></video><div class="guide"></div><p id="ph">Camera is off</p></div>
-<div class="row"><button id="cam">Start camera</button><button id="scan" class="go" disabled>Read plate</button></div>
+<div class="row"><button id="cam">Start camera</button><button id="scan" class="go" disabled>Read plate</button><button id="auto" disabled>Auto: off</button></div>
 <p class="mute" id="st">Reader not loaded yet.</p>
 <input id="plate" placeholder="AB12 CDE" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Number plate">
 <div class="row"><button id="log" class="go">Log sighting</button></div>
@@ -98,16 +98,15 @@ async function initReader(){
     await worker.setParameters({tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',tessedit_pageseg_mode:'7'});
     localStorage.setItem('platelog.ready','1');
     $('#st').textContent='Reader ready. Works offline on this device.';
-    $('#scan').disabled=false;
+    $('#scan').disabled=false;$('#auto').disabled=false;
   }catch(e){
     $('#st').textContent=localStorage.getItem('platelog.ready')?'Reader could not start. Type plates in manually.':'Reader needs one online load to download. You can still type plates in.';
   }
 }
-$('#scan').onclick=async()=>{
-  const v=$('#v');if(!v.videoWidth||!worker)return;
-  $('#st').textContent='Reading…';
+async function readFrame(){
+  const v=$('#v');if(!v.videoWidth||!worker)return null;
   const cw=v.videoWidth*.8,ch=v.videoHeight*.26,sx=v.videoWidth*.1,sy=v.videoHeight*.37;
-  const c=$('#c'),k=c.getContext('2d'),sc=Math.min(2,900/cw);c.width=cw*sc;c.height=ch*sc;
+  const c=$('#c'),k=c.getContext('2d',{willReadFrequently:true}),sc=Math.min(2,900/cw);c.width=cw*sc;c.height=ch*sc;
   k.drawImage(v,sx,sy,cw,ch,0,0,c.width,c.height);
   const im=k.getImageData(0,0,c.width,c.height),d=im.data;let lo=255,hi=0;
   for(let i=0;i<d.length;i+=4){const g=.3*d[i]+.59*d[i+1]+.11*d[i+2];d[i]=d[i+1]=d[i+2]=g;lo=Math.min(lo,g);hi=Math.max(hi,g)}
@@ -115,10 +114,44 @@ $('#scan').onclick=async()=>{
   k.putImageData(im,0,0);
   const {data}=await worker.recognize(c);
   const lines=data.text.split('\n').map(clean).filter(Boolean);
-  const best=lines.find(valid)||lines.sort((a,b)=>b.length-a.length)[0]||'';
+  return lines.find(valid)||lines.sort((a,b)=>b.length-a.length)[0]||'';
+}
+$('#scan').onclick=async()=>{
+  if(!stream){$('#st').textContent='Start the camera first.';return}
+  $('#st').textContent='Reading…';
+  const best=await readFrame();
+  if(best===null)return;
   $('#plate').value=best;
   $('#st').textContent=best?(valid(best)?'Check the plate below, then log it.':'Read, but not a UK format. Check it carefully.'):'Nothing read. Move closer or type it in.';
 };
+
+// Auto mode: reads about once a second, logs a plate seen in two frames in a row
+let auto=false,last='',seen={},wl,ac;
+function beep(){try{const o=ac.createOscillator();o.frequency.value=880;o.connect(ac.destination);o.start();o.stop(ac.currentTime+.25)}catch(e){}}
+async function loop(){
+  if(!auto)return;
+  try{
+    const b=await readFrame();
+    if(auto&&b&&valid(b)){
+      const c=canon(b);
+      if(c===last&&!(seen[c]>Date.now()-12e4)){seen[c]=Date.now();logPlate(b,true)}
+      last=c;
+    }else last='';
+  }catch(e){}
+  if(auto)setTimeout(loop,700);
+}
+function stopAuto(){auto=false;try{wl&&wl.release()}catch(e){}$('#auto').textContent='Auto: off';$('#auto').classList.remove('go');$('#st').textContent='Auto mode off.'}
+$('#auto').onclick=async()=>{
+  if(auto){stopAuto();return}
+  if(!stream){$('#st').textContent='Start the camera first.';return}
+  auto=true;last='';
+  try{ac=ac||new(window.AudioContext||window.webkitAudioContext)()}catch(e){}
+  try{wl=await navigator.wakeLock.request('screen')}catch(e){}
+  $('#auto').textContent='Auto: on';$('#auto').classList.add('go');
+  $('#st').textContent='Auto mode on. Keep this screen open.';
+  loop();
+};
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&auto)stopAuto()});
 
 // Log + match
 function check(p){
@@ -127,20 +160,23 @@ function check(p){
   const near=[...new Set(all.filter(r=>canon(r.p)!==c&&lev(canon(r.p),c)===1).map(r=>r.p))];
   return {same,near};
 }
-$('#log').onclick=()=>{
-  const p=clean($('#plate').value);
-  if(!p){$('#res').innerHTML='<div class="msg">Enter or scan a plate first.</div>';return}
+function logPlate(p,isAuto){
   const {same,near}=check(p);
   let h='';
-  if(same.length)h+=`<div class="msg hit"><b>${p}: seen ${same.length} time${same.length>1?'s':''} before</b>`+same.slice().reverse().slice(0,5).map(r=>`<div class="mute">${fmt(r.t)} · ${where(r)}</div>`).join('')+'</div>';
+  if(same.length){h+=`<div class="msg hit"><b>${p}: seen ${same.length} time${same.length>1?'s':''} before</b>`+same.slice().reverse().slice(0,5).map(r=>`<div class="mute">${fmt(r.t)} · ${where(r)}</div>`).join('')+'</div>';if(isAuto)beep()}
   else h+=`<div class="msg new"><b>${p}: first sighting</b></div>`;
   if(near.length)h+=`<div class="msg maybe"><b>Possible match</b><div class="mute">Close to ${near.join(', ')}. Could be a misread.</div></div>`;
   if(!valid(p))h+='<div class="msg maybe mute">Not a standard UK format. Logged anyway.</div>';
-  $('#res').innerHTML=h;
+  $('#res').innerHTML=(isAuto?'<p class="mute">Auto-logged just now</p>':'')+h;
   const rec={p,t:Date.now(),lat:null,lng:null};
-  const store=()=>{const a=load();a.push(rec);save(a);$('#plate').value='';render()};
+  const store=()=>{const a=load();a.push(rec);save(a);if(!isAuto)$('#plate').value='';render()};
   if(navigator.geolocation)navigator.geolocation.getCurrentPosition(g=>{rec.lat=g.coords.latitude;rec.lng=g.coords.longitude;store()},store,{enableHighAccuracy:true,timeout:6000,maximumAge:30000});
   else store();
+}
+$('#log').onclick=()=>{
+  const p=clean($('#plate').value);
+  if(!p){$('#res').innerHTML='<div class="msg">Enter or scan a plate first.</div>';return}
+  logPlate(p,false);
 };
 
 // History
